@@ -2561,7 +2561,18 @@ class ShellFileOperations(FileOperations):
             svc = get_service()
         except Exception:  # noqa: BLE001
             return ""
-        if svc is None or not svc.enabled_for(path):
+        if svc is None:
+            return ""
+        # ``enabled_for`` probes the workspace (git walk, cwd) and can raise
+        # on a host that has lost its working directory — e.g. a scratch /
+        # kanban workspace GC'd mid-session, which makes ``os.getcwd()``
+        # raise ``FileNotFoundError``.  This method promises to swallow
+        # every LSP error so a write can never fail on it; keep that
+        # promise here too instead of only around the diagnostics call.
+        try:
+            if not svc.enabled_for(path):
+                return ""
+        except Exception:  # noqa: BLE001
             return ""
 
         # Build a line-shift map when we have both pre and post — it

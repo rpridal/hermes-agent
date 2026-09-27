@@ -73,3 +73,58 @@ def test_normalize_path_expands_tilde(monkeypatch):
     monkeypatch.setenv("HOME", "/home/user")
     p = normalize_path("~/x.py")
     assert p == os.path.abspath("/home/user/x.py")
+
+
+# ---------------------------------------------------------------------------
+# Dangling process cwd (deleted scratch / kanban workspace, GC mid-session)
+# ---------------------------------------------------------------------------
+
+
+def _raise_missing_cwd(*_args, **_kwargs):
+    raise FileNotFoundError(2, "No such file or directory")
+
+
+def test_resolve_workspace_for_file_survives_deleted_cwd(tmp_path: Path, monkeypatch):
+    """A deleted process cwd must degrade to the file-anchored walk.
+
+    ``os.getcwd()`` raises ``FileNotFoundError`` once the directory the
+    process was launched in is removed — which is what a long-lived agent
+    session hits after its scratch/kanban workspace is garbage-collected.
+    The file itself is still a valid anchor, so resolution must not raise.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    file_path = repo / "x.py"
+    file_path.write_text("")
+
+    monkeypatch.setattr(os, "getcwd", _raise_missing_cwd)
+
+    root, gated = resolve_workspace_for_file(str(file_path))
+    assert root == str(repo)
+    assert gated is True
+
+
+def test_resolve_workspace_for_file_deleted_cwd_no_worktree(tmp_path: Path, monkeypatch):
+    """Same degraded state, file outside any worktree → (None, False), not a raise."""
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    file_path = outside / "x.py"
+    file_path.write_text("")
+
+    monkeypatch.setattr(os, "getcwd", _raise_missing_cwd)
+
+    assert resolve_workspace_for_file(str(file_path)) == (None, False)
+
+
+def test_resolve_workspace_for_file_explicit_cwd_still_wins(tmp_path: Path, monkeypatch):
+    """An explicit ``cwd`` argument is unaffected by a broken process cwd."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    file_path = repo / "x.py"
+    file_path.write_text("")
+
+    monkeypatch.setattr(os, "getcwd", _raise_missing_cwd)
+
+    root, gated = resolve_workspace_for_file(str(file_path), cwd=str(repo))
+    assert root == str(repo)
+    assert gated is True

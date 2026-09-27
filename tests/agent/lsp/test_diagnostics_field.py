@@ -99,3 +99,36 @@ def test_patch_replace_propagates_lsp_diagnostics(tmp_path):
 
     assert res.success is True
     assert res.lsp_diagnostics == block
+
+
+# ---------------------------------------------------------------------------
+# A broken LSP probe must never turn a successful write into an error
+# ---------------------------------------------------------------------------
+
+
+class _RaisingProbeService:
+    """Stands in for the LSP service when its workspace probe blows up.
+
+    ``enabled_for`` resolves the workspace and therefore calls
+    ``os.getcwd()``, which raises ``FileNotFoundError`` once the process's
+    working directory has been deleted (scratch/kanban workspace GC'd
+    mid-session).  It reproduces the reported symptom: a ``.py`` write that
+    landed on disk came back as ``{"error": "[Errno 2] No such file or
+    directory"}`` while ``.txt`` was unaffected.
+    """
+
+    def enabled_for(self, _path: str) -> bool:
+        raise FileNotFoundError(2, "No such file or directory")
+
+
+def test_write_file_survives_lsp_probe_failure(tmp_path, monkeypatch):
+    fops = ShellFileOperations(LocalEnvironment(cwd=str(tmp_path)))
+    target = tmp_path / "x.py"
+
+    monkeypatch.setattr("agent.lsp.get_service", lambda *a, **k: _RaisingProbeService())
+
+    res = fops.write_file(str(target), "x = 1\n")
+
+    assert res.error is None
+    assert target.read_text() == "x = 1\n"
+    assert res.lsp_diagnostics is None

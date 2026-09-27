@@ -170,6 +170,25 @@ def nearest_root(
     return None
 
 
+def _process_cwd() -> Optional[str]:
+    """Return the process's working directory, or ``None`` if unavailable.
+
+    ``os.getcwd()`` raises ``FileNotFoundError`` when the directory the
+    process was launched in has been deleted underneath it — normal on
+    the host once a scratch / kanban workspace is garbage-collected while
+    the session keeps running.  The cwd is only ever a *preferred* anchor
+    for workspace resolution, so an unavailable cwd must degrade to the
+    file-anchored walk instead of propagating the exception into a file
+    write (see the ``resolve_workspace_for_file`` callers in the write
+    path).
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        # ENOENT (cwd deleted) / EACCES — there is nothing to anchor on.
+        return None
+
+
 def resolve_workspace_for_file(
     file_path: str,
     *,
@@ -188,16 +207,20 @@ def resolve_workspace_for_file(
     isn't in a git worktree, we try the file's own location as a
     fallback.
 
+    An unavailable process cwd (deleted out from under a long-lived
+    session) is treated as "no cwd anchor" rather than an error.
+
     Returns ``(None, False)`` when neither path is in a git worktree.
     """
-    cwd = cwd or os.getcwd()
-    cwd_root = find_git_worktree(cwd)
-    if cwd_root is not None:
-        if is_inside_workspace(file_path, cwd_root):
-            return cwd_root, True
-        # File is outside the cwd's worktree — try the file's own
-        # location as a secondary anchor.  Useful for monorepos where
-        # the user opens an unrelated checkout.
+    cwd = cwd or _process_cwd()
+    if cwd is not None:
+        cwd_root = find_git_worktree(cwd)
+        if cwd_root is not None:
+            if is_inside_workspace(file_path, cwd_root):
+                return cwd_root, True
+            # File is outside the cwd's worktree — try the file's own
+            # location as a secondary anchor.  Useful for monorepos where
+            # the user opens an unrelated checkout.
     file_root = find_git_worktree(file_path)
     if file_root is not None:
         return file_root, True
