@@ -8,6 +8,7 @@ on.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -174,3 +175,139 @@ def test_service_status_includes_clients(mock_pyright):
         assert any(c["server_id"] == "pyright" for c in info["clients"])
     finally:
         svc.shutdown()
+
+
+def test_idle_reaper_releases_an_unused_client(mock_pyright):
+    """The background reaper stops a client after its idle timeout."""
+    repo = mock_pyright
+    f = repo / "x.py"
+    f.write_text("")
+    svc = LSPService(
+        enabled=True,
+        wait_mode="document",
+        wait_timeout=3.0,
+        install_strategy="manual",
+        idle_timeout=0.05,
+    )
+    try:
+        svc.get_diagnostics_sync(str(f))
+        key, client = next(iter(svc._clients.items()))
+
+        deadline = time.monotonic() + 2.0
+        while key in svc._clients and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert key not in svc._clients
+        assert not client.is_running
+    finally:
+        svc.shutdown()
+
+
+def test_client_cap_evicts_the_least_recently_used_idle_client(mock_pyright, monkeypatch):
+    """Opening a third workspace evicts the oldest of two idle clients."""
+    repo = mock_pyright
+    workspaces = [repo / name for name in ("one", "two", "three")]
+    files = []
+    for workspace in workspaces:
+        workspace.mkdir()
+        file_path = workspace / "x.py"
+        file_path.write_text("")
+        files.append(file_path)
+
+    monkeypatch.setattr(
+        "agent.lsp.manager.resolve_workspace_for_file",
+        lambda file_path: (str(Path(file_path).parent), True),
+    )
+    svc = LSPService(
+        enabled=True,
+        wait_mode="document",
+        wait_timeout=3.0,
+        install_strategy="manual",
+        idle_timeout=60.0,
+        max_clients=2,
+    )
+    try:
+        svc.get_diagnostics_sync(str(files[0]))
+        first_key, first_client = next(iter(svc._clients.items()))
+        svc._last_used[first_key] = 1.0
+
+        svc.get_diagnostics_sync(str(files[1]))
+        second_key = next(key for key in svc._clients if key != first_key)
+        svc._last_used[second_key] = 2.0
+
+        svc.get_diagnostics_sync(str(files[2]))
+
+        assert len(svc._clients) == 2
+        assert first_key not in svc._clients
+        assert second_key in svc._clients
+        assert not first_client.is_running
+    finally:
+        svc.shutdown()
+
+
+def test_idle_reaper_does_not_stop_a_client_with_an_active_request(mock_pyright):
+    """A stale timestamp cannot make the reaper kill an in-flight request."""
+    repo = mock_pyright
+    f = repo / "x.py"
+    f.write_text("")
+    svc = LSPService(
+        enabled=True,
+        wait_mode="document",
+        wait_timeout=3.0,
+        install_strategy="manual",
+        idle_timeout=60.0,
+    )
+    try:
+        svc.get_diagnostics_sync(str(f))
+        key, client = next(iter(svc._clients.items()))
+        svc._last_used[key] = time.time() - 61.0
+        svc._active_requests[key] = 1
+
+        svc._loop.run(svc._reap_idle_once(), timeout=5.0)
+
+        assert svc._clients[key] is client
+        assert client.is_running
+    finally:
+        svc.shutdown()
+
+
+def _fake_config_module(values):
+    """Build a stand-in ``hermes_cli.config`` returning ``values``."""
+    import types
+
+    module = types.ModuleType("hermes_cli.config")
+    setattr(module, "load_config", lambda: values)
+    package = types.ModuleType("hermes_cli")
+    setattr(package, "config", module)
+    return package, module
+
+
+def test_create_from_config_reads_idle_timeout_and_max_clients(monkeypatch):
+    """Both LSP guards are configurable, not hard-coded constants."""
+    package, module = _fake_config_module(
+        {"lsp": {"enabled": False, "idle_timeout": 123, "max_clients": 7}}
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
+
+    svc = LSPService.create_from_config()
+
+    assert svc is not None
+    assert svc._idle_timeout == 123.0
+    assert svc._max_clients == 7
+
+
+def test_create_from_config_falls_back_on_bad_cap(monkeypatch):
+    """A non-numeric cap falls back to the launchd-safe default."""
+    from agent.lsp.manager import DEFAULT_MAX_CLIENTS
+
+    package, module = _fake_config_module(
+        {"lsp": {"enabled": False, "max_clients": "plenty"}}
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
+
+    svc = LSPService.create_from_config()
+
+    assert svc is not None
+    assert svc._max_clients == DEFAULT_MAX_CLIENTS
