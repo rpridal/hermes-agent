@@ -134,6 +134,11 @@ lsp:
   # Set to 0 to disable idle reaping.
   idle_timeout: 600
 
+  # Upper bound on cached language servers at once.  Raise it only if the
+  # process has a file-descriptor budget well above the ~72 + 10/client
+  # default; busy clients are never evicted for the cap.
+  max_clients: 16
+
   # How to handle missing server binaries.
   #   auto    — install via npm/pip/go install into <HERMES_HOME>/lsp/bin
   #   manual  — only use binaries already on PATH
@@ -192,7 +197,7 @@ rust-analyzer mid-indexing.
 
 Servers stay warm for `idle_timeout` seconds after their last request
 (default: 10 minutes), then the background reaper shuts them down.
-The service keeps at most 24 cached clients: when a new workspace
+The service keeps at most 16 cached clients: when a new workspace
 needs room, it evicts the least-recently-used *idle* client. A client
 with a request in progress is never reaped or evicted; if every cached
 client is busy, the new request is skipped rather than exceeding the

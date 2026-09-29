@@ -269,3 +269,45 @@ def test_idle_reaper_does_not_stop_a_client_with_an_active_request(mock_pyright)
         assert client.is_running
     finally:
         svc.shutdown()
+
+
+def _fake_config_module(values):
+    """Build a stand-in ``hermes_cli.config`` returning ``values``."""
+    import types
+
+    module = types.ModuleType("hermes_cli.config")
+    setattr(module, "load_config", lambda: values)
+    package = types.ModuleType("hermes_cli")
+    setattr(package, "config", module)
+    return package, module
+
+
+def test_create_from_config_reads_idle_timeout_and_max_clients(monkeypatch):
+    """Both LSP guards are configurable, not hard-coded constants."""
+    package, module = _fake_config_module(
+        {"lsp": {"enabled": False, "idle_timeout": 123, "max_clients": 7}}
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
+
+    svc = LSPService.create_from_config()
+
+    assert svc is not None
+    assert svc._idle_timeout == 123.0
+    assert svc._max_clients == 7
+
+
+def test_create_from_config_falls_back_on_bad_cap(monkeypatch):
+    """A non-numeric cap falls back to the launchd-safe default."""
+    from agent.lsp.manager import DEFAULT_MAX_CLIENTS
+
+    package, module = _fake_config_module(
+        {"lsp": {"enabled": False, "max_clients": "plenty"}}
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", module)
+
+    svc = LSPService.create_from_config()
+
+    assert svc is not None
+    assert svc._max_clients == DEFAULT_MAX_CLIENTS

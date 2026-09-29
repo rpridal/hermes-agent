@@ -59,7 +59,12 @@ from agent.lsp.workspace import (
 logger = logging.getLogger("agent.lsp.manager")
 
 DEFAULT_IDLE_TIMEOUT = 600  # seconds; servers idle for >10min get reaped
-DEFAULT_MAX_CLIENTS = 24  # protects long-running gateways from FD exhaustion
+# A live language server costs roughly ten descriptors (its stdio pipes plus
+# the child's own fds) over the ~72 the process needs at rest, so this cap is
+# sized to stay inside launchd's default 256 soft limit even when nobody
+# raises it: 72 + 16 x 10 is about 232.  Hosts that install the higher
+# SoftResourceLimits can raise ``lsp.max_clients`` via config.
+DEFAULT_MAX_CLIENTS = 16
 
 
 class _BackgroundLoop:
@@ -219,6 +224,10 @@ class LSPService:
             idle_timeout = float(lsp_cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
         except (TypeError, ValueError):
             idle_timeout = DEFAULT_IDLE_TIMEOUT
+        try:
+            max_clients = int(lsp_cfg.get("max_clients", DEFAULT_MAX_CLIENTS))
+        except (TypeError, ValueError):
+            max_clients = DEFAULT_MAX_CLIENTS
         servers_cfg = lsp_cfg.get("servers") or {}
         disabled = []
         binary_overrides: Dict[str, List[str]] = {}
@@ -250,6 +259,7 @@ class LSPService:
             init_overrides=init_overrides,
             disabled_servers=disabled,
             idle_timeout=idle_timeout,
+            max_clients=max_clients,
         )
 
     # ------------------------------------------------------------------
